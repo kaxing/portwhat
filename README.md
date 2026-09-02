@@ -15,6 +15,12 @@ export PATH="$HOME/go/bin:$PATH"
 portwhat
 ```
 
+## Uninstall
+
+```sh
+rm "$(go env GOPATH)/bin/portwhat"
+```
+
 ## Usage
 
 ```
@@ -23,4 +29,4 @@ portwhat next      print only the recommended port number (for scripts)
 portwhat 3000 80   show status for specific ports
 ```
 
-Some process names may show as `unknown` without elevated privileges.
+No elevated privileges needed. A few process details may stay `unknown`.
