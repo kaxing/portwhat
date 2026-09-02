@@ -19,16 +19,15 @@ func TestParsePortArgs(t *testing.T) {
 		t.Fatalf("unexpected ports: %#v", ports)
 	}
 
-	for _, bad := range [][]string{{"abc"}, {"0"}, {"65536"}, {"-1"}, {"3000", "abc"}, {}} {
+	for _, bad := range [][]string{{"abc"}, {"3000", "abc"}, {}} {
 		if _, ok := parsePortArgs(bad); ok {
 			t.Fatalf("expected %#v to be rejected", bad)
 		}
 	}
-	if _, ok := parsePortArgs([]string{"1"}); !ok {
-		t.Fatal("expected port 1 to be accepted")
-	}
-	if _, ok := parsePortArgs([]string{"65535"}); !ok {
-		t.Fatal("expected port 65535 to be accepted")
+	for _, numeric := range []string{"1", "65535", "0", "65536", "-1"} {
+		if _, ok := parsePortArgs([]string{numeric}); !ok {
+			t.Fatalf("expected %q to parse as a port query", numeric)
+		}
 	}
 }
 

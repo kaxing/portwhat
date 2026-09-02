@@ -9,9 +9,7 @@ import (
 	"time"
 )
 
-// firewallState is the best-effort answer to "does a host firewall stand
-// between 'public' binds and the network?". Probing rulesets usually needs
-// root, so "unknown" is a common and honest answer.
+// Probing firewall rulesets usually needs root, so Known=false is common.
 type firewallState struct {
 	Known   bool
 	Enabled bool
@@ -89,20 +87,18 @@ func securityFindings(infos []PortInfo, fw firewallState, stats securityStats) [
 	return findings
 }
 
-// privilegedPortFinding flags a listener on a privileged port (<1024) whose
-// process is not owned by root. On most systems only root (or a capability
-// like CAP_NET_BIND_SERVICE) can bind these, so a plain-user owner is worth a
-// look. macOS 10.14+ lets any user bind <1024, which makes the mismatch
-// easier to create — and easier to abuse for service impersonation.
+// RFC 7605: system ports SHOULD require privilege to bind, so a plain-user
+// owner is suspect. macOS 10.14+ lets any user bind <1024, which makes the
+// mismatch easy to create — and easy to abuse for service impersonation.
 func privilegedPortFinding(info PortInfo) (string, bool) {
-	if info.Port >= 1024 {
+	if info.Port >= userPortStart {
 		return "", false
 	}
 	owner := strings.TrimSpace(info.Owner)
 	if owner == "" || owner == "unknown" || isSystemUser(owner) {
 		return "", false
 	}
-	return fmt.Sprintf("! %d/%s (%s) is a privileged port but the process runs as %q, not a system account — unusual for a system service",
+	return fmt.Sprintf("! %d/%s (%s) is a system-range port but the process runs as %q, not a system account — unusual for a system service",
 		info.Port, info.Proto, displayProcess(info.Process), owner), true
 }
 

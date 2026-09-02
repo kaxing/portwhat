@@ -26,6 +26,23 @@ type PortInfo struct {
 	Purpose string
 }
 
+// RFC 6335/7605 ranges: System below 1024, User below 49152, Dynamic above.
+const (
+	userPortStart    = 1024
+	dynamicPortStart = 49152
+)
+
+func availabilityNote(port int) string {
+	switch {
+	case port < userPortStart:
+		return "Available (system range — binding usually needs root/privilege)"
+	case port >= dynamicPortStart:
+		return "Available (dynamic range — the OS hands these to client sockets)"
+	default:
+		return "Available"
+	}
+}
+
 var processNameCache = map[int]string{}
 var processOwnerCache = map[int]string{}
 var processAgeCache = map[int]string{}
@@ -136,8 +153,6 @@ type portGroup struct {
 	infos []PortInfo
 }
 
-// printGroupedTable renders all groups as one table: shared column widths, the
-// header printed once, and each group introduced by a title row inside it.
 func printGroupedTable(groups []portGroup) {
 	var all []PortInfo
 	for _, group := range groups {
@@ -236,9 +251,13 @@ func printPortStatus(infos []PortInfo, ports []int) {
 		line := divider(width)
 		fmt.Println(line)
 		for _, port := range ports {
+			if port < 1 || port > 65535 {
+				fmt.Printf("%5d       n/a    Not a port (valid range 1-65535)\n", port)
+				continue
+			}
 			entries := byPort[port]
 			if len(entries) == 0 {
-				fmt.Printf("%5d       free   Available\n", port)
+				fmt.Printf("%5d       free   %s\n", port, availabilityNote(port))
 				continue
 			}
 			for _, info := range entries {
@@ -257,13 +276,11 @@ func printPortStatus(infos []PortInfo, ports []int) {
 	processWidth := runeLen("PROCESS")
 	bindWidth := runeLen("BIND")
 	ageWidth := runeLen("AGE")
-	purposeWidth := maxInt(runeLen("WHAT"), runeLen("Available"))
 	for _, port := range ports {
 		for _, info := range byPort[port] {
 			processWidth = maxInt(processWidth, runeLen(displayProcess(info.Process)))
 			bindWidth = maxInt(bindWidth, runeLen(displayBind(info.Bind)))
 			ageWidth = maxInt(ageWidth, runeLen(displayAge(info.Age)))
-			purposeWidth = maxInt(purposeWidth, runeLen(info.Purpose))
 		}
 	}
 
@@ -281,9 +298,13 @@ func printPortStatus(infos []PortInfo, ports []int) {
 		)
 	}
 	for _, port := range ports {
+		if port < 1 || port > 65535 {
+			printRow(port, "", "n/a", "", "", "", "Not a port (valid range 1-65535)")
+			continue
+		}
 		entries := byPort[port]
 		if len(entries) == 0 {
-			printRow(port, "", "free", "", "", "", "Available")
+			printRow(port, "", "free", "", "", "", availabilityNote(port))
 			continue
 		}
 		for _, info := range entries {
@@ -297,9 +318,11 @@ func parsePortArgs(args []string) ([]int, bool) {
 		return nil, false
 	}
 	ports := make([]int, 0, len(args))
+	// Any integer is treated as a port query; range errors are reported per
+	// port by printPortStatus instead of rejecting the whole command.
 	for _, arg := range args {
 		port, err := strconv.Atoi(arg)
-		if err != nil || port < 1 || port > 65535 {
+		if err != nil {
 			return nil, false
 		}
 		ports = append(ports, port)
@@ -395,7 +418,7 @@ func suggestNearActiveDevCluster(usedPorts []int, used map[int]bool) (int, bool)
 }
 
 func isGoodCandidatePort(port int, used map[int]bool) bool {
-	if port < 1024 || used[port] || commonPorts[port] != "" {
+	if port < userPortStart || used[port] || commonPorts[port] != "" {
 		return false
 	}
 	for _, reserved := range []int{6000, 6666, 6667} {
@@ -448,8 +471,7 @@ func sortByRisk(infos []PortInfo) {
 	})
 }
 
-// sensitivePurposes are exact purpose labels for remote-access, mail, and
-// datastore services; exact matches avoid substring surprises ("mDNS" ⊃ "DNS").
+// Exact matches only: substring matching would flag "mDNS / Bonjour" via "DNS".
 var sensitivePurposes = map[string]bool{
 	"SSH": true, "DNS": true, "SMTP": true, "SMTP submission": true, "SMTPS": true,
 	"POP3": true, "POP3S": true, "IMAP": true, "IMAPS": true,
@@ -469,7 +491,7 @@ func riskScore(info PortInfo) int {
 	}
 	if _, unusual := privilegedPortFinding(info); unusual {
 		risk += 80
-	} else if info.Port < 1024 {
+	} else if info.Port < userPortStart {
 		risk += 20
 	}
 	if displayProcess(info.Process) == "unknown" {
@@ -740,8 +762,7 @@ func maxInt(a, b int) int {
 }
 
 func discoverPorts() ([]PortInfo, error) {
-	// One "inet" query returns TCP and UDP sockets together; reading the
-	// tables twice would double the (comparatively slow) system probing.
+	// Single "inet" query: probing the TCP and UDP tables separately costs twice.
 	conns, err := gnet.Connections("inet")
 	if err != nil {
 		return nil, fmt.Errorf("could not discover listening ports: %w", err)
@@ -757,10 +778,9 @@ func discoverPorts() ([]PortInfo, error) {
 			}
 			infos = append(infos, buildPortInfo(conn, "tcp"))
 		case syscall.SOCK_DGRAM:
-			// UDP has no LISTEN state, so any bound socket without a remote
-			// peer counts. Unknown ephemeral-range sockets are skipped because
-			// they are almost always short-lived clients; known services stay.
-			if port == 0 || conn.Raddr.Port != 0 || port >= 49152 && udpCommonPorts[port] == "" {
+			// UDP has no LISTEN state: any bound socket without a remote peer
+			// counts, except unknown dynamic-range ones (short-lived clients).
+			if port == 0 || conn.Raddr.Port != 0 || port >= dynamicPortStart && udpCommonPorts[port] == "" {
 				continue
 			}
 			infos = append(infos, buildPortInfo(conn, "udp"))
@@ -900,24 +920,20 @@ func explainPort(port int, proto, process string, pid int) string {
 		return "Likely local development server"
 	}
 
-	// /etc/services (macOS and Linux) is authoritative below 1024 but full of
-	// stale legacy assignments above it, so only fall back to it there when the
-	// process is unresolvable (e.g. another user's service on Linux non-root)
-	// and the registry name is the only evidence left.
-	if port < 1024 || displayProcess(process) == "unknown" {
+	// /etc/services is authoritative below 1024 but stale above it, so up there
+	// it is consulted only when the process is unresolvable (no better evidence).
+	if port < userPortStart || displayProcess(process) == "unknown" {
 		if svc := serviceFromEtc(port, proto); svc != "" {
 			return svc + " (/etc/services)"
 		}
 	}
 
-	if port >= 49152 {
-		return "Ephemeral/high dynamic port"
+	if port >= dynamicPortStart {
+		return "Dynamic/private port (ephemeral)"
 	}
 	return "Unknown app/service"
 }
 
-// cmdlineHints identifies servers whose process name is a generic runtime
-// (node, python…) but whose command line names the actual framework.
 var cmdlineHints = []struct{ needle, purpose string }{
 	{"vite", "Vite dev server"},
 	{"next dev", "Next.js dev server"},
@@ -1027,9 +1043,8 @@ func dedupeAndSort(infos []PortInfo) []PortInfo {
 	return out
 }
 
-// mergePortInfo combines duplicate listeners on the same port (typically an
-// IPv4 and an IPv6 socket): keep the known process details, and keep the most
-// exposed bind so a service also reachable publicly is never shown as local.
+// Merging IPv4/IPv6 twins keeps the most exposed bind so a service that is
+// also reachable publicly is never shown as local.
 func mergePortInfo(a, b PortInfo) PortInfo {
 	out := a
 	if a.Process == "unknown" && b.Process != "unknown" {
