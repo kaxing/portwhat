@@ -92,6 +92,7 @@ func main() {
 
 	switch firstArg(args) {
 	case "":
+		fmt.Printf("Scan mode: %s\n\n", scanMode())
 		printPorts(infos)
 		printSecurityNotes(infos)
 		fmt.Println()
@@ -107,6 +108,7 @@ func main() {
 			printHelp()
 			os.Exit(2)
 		}
+		fmt.Printf("Scan mode: %s\n\n", scanMode())
 		printPortStatus(infos, ports)
 	}
 }

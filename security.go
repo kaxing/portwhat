@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -30,6 +31,9 @@ func printSecurityNotes(infos []PortInfo) {
 	fmt.Printf("  Firewall: %s — %s\n", firewallLabel(fw), fw.Detail)
 	for _, finding := range securityFindings(infos, fw, stats) {
 		fmt.Printf("  %s\n", finding)
+	}
+	if stats.UnknownProcess > 0 && os.Geteuid() != 0 {
+		fmt.Printf("  Tip: sudo `which portwhat` can identify the %d unknown process(es)\n", stats.UnknownProcess)
 	}
 }
 
@@ -62,6 +66,13 @@ func collectSecurityStats(infos []PortInfo) securityStats {
 		}
 	}
 	return stats
+}
+
+func scanMode() string {
+	if os.Geteuid() == 0 {
+		return "privileged (root)"
+	}
+	return "unprivileged — other users' sockets may lack process details"
 }
 
 func firewallLabel(fw firewallState) string {
@@ -104,7 +115,7 @@ func privilegedPortFinding(info PortInfo) (string, bool) {
 
 func isSystemUser(owner string) bool {
 	owner = strings.ToLower(owner)
-	if owner == "root" || strings.HasSuffix(owner, "\\system") || owner == "system" {
+	if owner == "root" {
 		return true
 	}
 	// Dedicated service accounts (_www, _mdnsresponder on macOS; daemon,

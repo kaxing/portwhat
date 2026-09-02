@@ -30,3 +30,9 @@ portwhat 3000 80   show status for specific ports
 ```
 
 portwhat never asks for elevated privileges, so a few process details may show as `unknown`.
+
+To see more, run it with `sudo`:
+
+```sh
+sudo `which portwhat`
+```

@@ -1,14 +1,17 @@
 BINARY := portwhat
 
-.PHONY: all build test clean
+.PHONY: all build vet test clean
 
 all: build
 
 build:
 	go build -o $(BINARY) .
 
-test:
-	go test ./...
+vet:
+	go vet ./...
+
+test: vet
+	go test -v ./...
 
 clean:
 	rm -f $(BINARY)
