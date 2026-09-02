@@ -29,4 +29,4 @@ portwhat next      print only the recommended port number (for scripts)
 portwhat 3000 80   show status for specific ports
 ```
 
-No elevated privileges needed. A few process details may stay `unknown`.
+portwhat never asks for elevated privileges, so a few process details may show as `unknown`.
