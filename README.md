@@ -2,13 +2,14 @@
 
 Not knowing what port is used for what? No portblem.
 
-Shows every listening TCP/UDP port, explains what it probably is, flags
-security oddities, and recommends a free port for your next dev server.
-Reads the local socket tables only — never sends packets.
+See what's using your ports, spot anything unusual, and find a free port for
+your next dev server. portwhat only reads your local socket tables — it never
+sends packets.
 
-## Install
+## Install & run
 
 ```sh
+brew install go
 go install github.com/kaxing/portwhat@latest
 export PATH="$HOME/go/bin:$PATH"
 portwhat

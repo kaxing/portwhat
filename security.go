@@ -19,38 +19,74 @@ type firewallState struct {
 }
 
 func printSecurityNotes(infos []PortInfo) {
-	notes := securityNotes(infos, detectFirewall())
-	if len(notes) == 0 {
+	if len(infos) == 0 {
 		return
 	}
+	fw := detectFirewall()
+	stats := collectSecurityStats(infos)
+
 	fmt.Println()
-	fmt.Println("Security notes")
-	for _, note := range notes {
-		fmt.Printf("  %s\n", note)
+	fmt.Println("Security overview")
+	fmt.Printf("  Exposure: %d public · %d interface · %d local · %d unknown\n", stats.Public, stats.Interface, stats.Local, stats.UnknownBind)
+	fmt.Printf("  Processes: %d identified · %d unknown\n", stats.KnownProcess, stats.UnknownProcess)
+	fmt.Printf("  Firewall: %s — %s\n", firewallLabel(fw), fw.Detail)
+	for _, finding := range securityFindings(infos, fw, stats) {
+		fmt.Printf("  %s\n", finding)
 	}
 }
 
-func securityNotes(infos []PortInfo, fw firewallState) []string {
-	notes := []string{}
+type securityStats struct {
+	Public         int
+	Interface      int
+	Local          int
+	UnknownBind    int
+	KnownProcess   int
+	UnknownProcess int
+}
 
+func collectSecurityStats(infos []PortInfo) securityStats {
+	var stats securityStats
+	for _, info := range infos {
+		switch displayBind(info.Bind) {
+		case "public":
+			stats.Public++
+		case "local":
+			stats.Local++
+		case "unknown":
+			stats.UnknownBind++
+		default:
+			stats.Interface++
+		}
+		if displayProcess(info.Process) == "unknown" {
+			stats.UnknownProcess++
+		} else {
+			stats.KnownProcess++
+		}
+	}
+	return stats
+}
+
+func firewallLabel(fw firewallState) string {
+	if !fw.Known {
+		return "unknown"
+	}
+	if fw.Enabled {
+		return "enabled"
+	}
+	return "disabled"
+}
+
+func securityFindings(infos []PortInfo, fw firewallState, stats securityStats) []string {
+	var findings []string
 	for _, info := range infos {
 		if finding, ok := privilegedPortFinding(info); ok {
-			notes = append(notes, finding)
+			findings = append(findings, finding)
 		}
 	}
-
-	if public := publicPortCount(infos); public > 0 {
-		switch {
-		case fw.Known && fw.Enabled:
-			notes = append(notes, fmt.Sprintf("· %d port(s) bound publicly, but %s — they may not actually be reachable from other hosts", public, fw.Detail))
-		case fw.Known && !fw.Enabled:
-			notes = append(notes, fmt.Sprintf("! %d port(s) bound publicly and %s — anything on your network can reach them", public, fw.Detail))
-		default:
-			notes = append(notes, fmt.Sprintf("· %d port(s) bound publicly; firewall state unknown (%s)", public, fw.Detail))
-		}
+	if exposed := stats.Public + stats.Interface; exposed > 0 && fw.Known && !fw.Enabled {
+		findings = append(findings, fmt.Sprintf("! %d network-bound endpoint(s) with the host firewall disabled", exposed))
 	}
-
-	return notes
+	return findings
 }
 
 // privilegedPortFinding flags a listener on a privileged port (<1024) whose
@@ -78,16 +114,6 @@ func isSystemUser(owner string) bool {
 	// Dedicated service accounts (_www, _mdnsresponder on macOS; daemon,
 	// systemd-* on Linux) are deliberate privilege separation, not a finding.
 	return strings.HasPrefix(owner, "_") || owner == "daemon" || strings.HasPrefix(owner, "systemd-")
-}
-
-func publicPortCount(infos []PortInfo) int {
-	count := 0
-	for _, info := range infos {
-		if displayBind(info.Bind) == "public" {
-			count++
-		}
-	}
-	return count
 }
 
 func detectFirewall() firewallState {

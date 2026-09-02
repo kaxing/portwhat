@@ -112,6 +112,19 @@ func TestWrapText(t *testing.T) {
 	}
 }
 
+func TestPrintPortsSeparatesTCPAndUDP(t *testing.T) {
+	infos := []PortInfo{
+		{Port: 3000, Proto: "tcp", Process: "node", Bind: "127.0.0.1", Purpose: "JavaScript app/dev server"},
+		{Port: 5353, Proto: "udp", Process: "mDNSResponder", Bind: "0.0.0.0", Purpose: "mDNS / Bonjour"},
+	}
+
+	t.Setenv("COLUMNS", "100")
+	out := captureStdout(t, func() { printPorts(infos) })
+	if !strings.Contains(out, "Listening TCP ports (1)") || !strings.Contains(out, "Bound UDP sockets (1)") {
+		t.Fatalf("expected separate TCP and UDP sections\noutput:\n%s", out)
+	}
+}
+
 func TestPrintPortStatus(t *testing.T) {
 	infos := []PortInfo{{
 		Port:    8504,
@@ -282,7 +295,7 @@ func TestExplainPort(t *testing.T) {
 		{5353, "tcp", "someapp", "Unknown app/service"},
 	}
 	for _, c := range cases {
-		if got := explainPort(c.port, c.proto, c.process); got != c.want {
+		if got := explainPort(c.port, c.proto, c.process, 0); got != c.want {
 			t.Fatalf("explainPort(%d, %q, %q) = %q, want %q", c.port, c.proto, c.process, got, c.want)
 		}
 	}
@@ -341,27 +354,19 @@ func TestPrivilegedPortFinding(t *testing.T) {
 	}
 }
 
-func TestSecurityNotesFirewallReconciliation(t *testing.T) {
-	public := []PortInfo{{Port: 6379, Proto: "tcp", Process: "redis-server", Owner: "kaxing", Bind: "0.0.0.0"}}
-	local := []PortInfo{{Port: 6379, Proto: "tcp", Process: "redis-server", Owner: "kaxing", Bind: "127.0.0.1"}}
-
-	notes := securityNotes(public, firewallState{Known: true, Enabled: false, Detail: "ufw is inactive"})
-	if len(notes) != 1 || !strings.Contains(notes[0], "anything on your network can reach them") {
-		t.Fatalf("expected a warning for public bind with firewall off, got %#v", notes)
+func TestSecurityStatsAndFindings(t *testing.T) {
+	infos := []PortInfo{
+		{Port: 6379, Proto: "tcp", Process: "redis-server", Owner: "kaxing", Bind: "0.0.0.0"},
+		{Port: 3000, Proto: "tcp", Process: "node", Owner: "kaxing", Bind: "127.0.0.1"},
+		{Port: 5353, Proto: "udp", Process: "unknown", Owner: "unknown", Bind: "192.168.1.5"},
 	}
-
-	notes = securityNotes(public, firewallState{Known: true, Enabled: true, Detail: "ufw is active"})
-	if len(notes) != 1 || !strings.Contains(notes[0], "may not actually be reachable") {
-		t.Fatalf("expected a softened note for public bind with firewall on, got %#v", notes)
+	stats := collectSecurityStats(infos)
+	if stats.Public != 1 || stats.Interface != 1 || stats.Local != 1 || stats.UnknownProcess != 1 {
+		t.Fatalf("unexpected security stats: %#v", stats)
 	}
-
-	notes = securityNotes(public, firewallState{Detail: "could not query socketfilterfw or pfctl"})
-	if len(notes) != 1 || !strings.Contains(notes[0], "firewall state unknown") {
-		t.Fatalf("expected an unknown-state note for public bind, got %#v", notes)
-	}
-
-	if notes = securityNotes(local, firewallState{Known: true, Enabled: false, Detail: "ufw is inactive"}); len(notes) != 0 {
-		t.Fatalf("expected no notes for local-only binds, got %#v", notes)
+	findings := securityFindings(infos, firewallState{Known: true, Enabled: false}, stats)
+	if len(findings) != 1 || !strings.Contains(findings[0], "2 network-bound endpoint(s)") {
+		t.Fatalf("expected a factual firewall finding, got %#v", findings)
 	}
 }
 

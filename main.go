@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -28,6 +29,7 @@ type PortInfo struct {
 var processNameCache = map[int]string{}
 var processOwnerCache = map[int]string{}
 var processAgeCache = map[int]string{}
+var processCmdlineCache = map[int]string{}
 
 var commonPorts = map[int]string{
 	22:   "SSH",
@@ -108,84 +110,107 @@ func printHelp() {
 
 func printPorts(infos []PortInfo) {
 	if len(infos) == 0 {
-		fmt.Println("No listening TCP ports found.")
+		fmt.Println("No listening TCP ports or bound UDP sockets found.")
 		return
+	}
+	var tcp, udp []PortInfo
+	for _, info := range infos {
+		if info.Proto == "udp" {
+			udp = append(udp, info)
+		} else {
+			tcp = append(tcp, info)
+		}
+	}
+	var groups []portGroup
+	if len(tcp) > 0 {
+		groups = append(groups, portGroup{"Listening TCP ports", tcp})
+	}
+	if len(udp) > 0 {
+		groups = append(groups, portGroup{"Bound UDP sockets", udp})
+	}
+	printGroupedTable(groups)
+}
+
+type portGroup struct {
+	title string
+	infos []PortInfo
+}
+
+// printGroupedTable renders all groups as one table: shared column widths, the
+// header printed once, and each group introduced by a title row inside it.
+func printGroupedTable(groups []portGroup) {
+	var all []PortInfo
+	for _, group := range groups {
+		sortByRisk(group.infos)
+		all = append(all, group.infos...)
 	}
 
 	width := terminalWidth()
-	fmt.Printf("Listening ports (%d)\n", len(infos))
 
-	if width < 56 {
-		line := strings.Repeat("─", maxInt(20, width))
-		fmt.Println(line)
-		for _, info := range infos {
-			fmt.Printf("%5d  %-3s  %s\n", info.Port, info.Proto, info.Purpose)
-			if meta := compactMeta(info); meta != "" {
-				fmt.Printf("       %s\n", meta)
+	if width < 60 {
+		line := divider(width)
+		for _, group := range groups {
+			fmt.Printf("%s (%d)\n", group.title, len(group.infos))
+			fmt.Println(line)
+			for _, info := range group.infos {
+				fmt.Printf("  %5d  %s\n", info.Port, info.Purpose)
+				if meta := compactMeta(info); meta != "" {
+					fmt.Printf("         %s\n", meta)
+				}
 			}
 		}
-		fmt.Println(line)
 		return
 	}
 
-	portWidth := maxInt(runeLen("PORT"), maxPortWidth(infos))
-	protoWidth := maxInt(runeLen("PROTO"), maxFieldWidth(infos, func(info PortInfo) string { return info.Proto }))
-	processWidth := maxInt(runeLen("PROCESS"), maxFieldWidth(infos, func(info PortInfo) string { return displayProcess(info.Process) }))
-	bindWidth := maxInt(runeLen("BIND"), maxFieldWidth(infos, func(info PortInfo) string { return displayBind(info.Bind) }))
-	ageWidth := maxInt(runeLen("AGE"), maxFieldWidth(infos, func(info PortInfo) string { return displayAge(info.Age) }))
-	purposeWidth := maxInt(runeLen("WHAT"), maxFieldWidth(infos, func(info PortInfo) string { return info.Purpose }))
+	portWidth := maxInt(runeLen("PORT"), maxPortWidth(all))
+	processWidth := min(24, maxInt(runeLen("PROCESS"), maxFieldWidth(all, func(info PortInfo) string { return displayProcess(info.Process) })))
+	bindWidth := min(18, maxInt(runeLen("BIND"), maxFieldWidth(all, func(info PortInfo) string { return displayBind(info.Bind) })))
+	ageWidth := min(10, maxInt(runeLen("AGE"), maxFieldWidth(all, func(info PortInfo) string { return displayAge(info.Age) })))
+	purposeWidth := min(48, maxInt(runeLen("WHAT"), maxFieldWidth(all, func(info PortInfo) string { return info.Purpose })))
 
-	minProcessWidth := 10
-	minPurposeWidth := 12
-	for tableWidth(portWidth, protoWidth, processWidth, bindWidth, ageWidth, purposeWidth) > width {
-		changed := false
-		if purposeWidth > minPurposeWidth {
+shrink:
+	for tableWidth(portWidth, processWidth, bindWidth, ageWidth, purposeWidth) > width {
+		switch {
+		case purposeWidth > 12:
 			purposeWidth--
-			changed = true
-		}
-		if tableWidth(portWidth, protoWidth, processWidth, bindWidth, ageWidth, purposeWidth) <= width {
-			break
-		}
-		if processWidth > minProcessWidth {
+		case processWidth > 10:
 			processWidth--
-			changed = true
-		}
-		if !changed {
-			break
+		case bindWidth > 8:
+			bindWidth--
+		default:
+			break shrink
 		}
 	}
 
-	widths := []int{portWidth, protoWidth, processWidth, bindWidth, ageWidth, purposeWidth}
-	fmt.Println(tableBorder(widths))
-	fmt.Printf("  %-*s   %-*s   %-*s   %-*s   %-*s   %s\n", portWidth, "PORT", protoWidth, "PROTO", processWidth, "PROCESS", bindWidth, "BIND", ageWidth, "AGE", "WHAT")
-	fmt.Println(tableBorder(widths))
-	for _, info := range infos {
-		processLines := wrapText(displayProcess(info.Process), processWidth)
-		bindLines := wrapText(displayBind(info.Bind), bindWidth)
-		purposeLines := wrapText(info.Purpose, purposeWidth)
-		rows := maxInt(len(processLines), maxInt(len(bindLines), len(purposeLines)))
-		for i := 0; i < rows; i++ {
-			portCell, protoCell, ageCell := "", "", ""
-			if i == 0 {
-				portCell = strconv.Itoa(info.Port)
-				protoCell = info.Proto
-				ageCell = displayAge(info.Age)
+	fmt.Printf("   %-*s   %-*s   %-*s   %-*s   %s\n", portWidth, "PORT", processWidth, "PROCESS", bindWidth, "BIND", ageWidth, "AGE", "WHAT")
+	fmt.Println(divider(width))
+	for _, group := range groups {
+		fmt.Printf("%s (%d)\n", group.title, len(group.infos))
+		for _, info := range group.infos {
+			processLines := wrapText(displayProcess(info.Process), processWidth)
+			bindLines := wrapText(displayBind(info.Bind), bindWidth)
+			purposeLines := wrapText(info.Purpose, purposeWidth)
+			rows := maxInt(len(processLines), maxInt(len(bindLines), len(purposeLines)))
+			for i := 0; i < rows; i++ {
+				portCell, ageCell := "", ""
+				if i == 0 {
+					portCell = strconv.Itoa(info.Port)
+					ageCell = displayAge(info.Age)
+				}
+				fmt.Printf("   %*s   %s   %s   %s   %s\n",
+					portWidth, portCell,
+					padRight(lineAt(processLines, i), processWidth),
+					padRight(lineAt(bindLines, i), bindWidth),
+					padRight(ageCell, ageWidth),
+					lineAt(purposeLines, i),
+				)
 			}
-			fmt.Printf("  %*s   %s   %s   %s   %s   %s\n",
-				portWidth, portCell,
-				padRight(protoCell, protoWidth),
-				padRight(lineAt(processLines, i), processWidth),
-				padRight(lineAt(bindLines, i), bindWidth),
-				padRight(ageCell, ageWidth),
-				lineAt(purposeLines, i),
-			)
 		}
 	}
-	fmt.Println(tableBorder(widths))
 }
 
-func tableBorder(widths []int) string {
-	return strings.Repeat("─", tableWidth(widths...))
+func divider(width int) string {
+	return strings.Repeat("─", maxInt(20, width))
 }
 
 func printSuggestion(infos []PortInfo) {
@@ -195,7 +220,7 @@ func printSuggestion(infos []PortInfo) {
 		return
 	}
 
-	fmt.Printf("Recommended next port: %d (%s)\n", port, reason)
+	fmt.Printf("Recommended next port\n  %d (%s)\n", port, reason)
 }
 
 func printPortStatus(infos []PortInfo, ports []int) {
@@ -206,8 +231,9 @@ func printPortStatus(infos []PortInfo, ports []int) {
 
 	fmt.Printf("Port status (%d)\n", len(ports))
 
-	if width := terminalWidth(); width < 56 {
-		line := strings.Repeat("─", maxInt(20, width))
+	width := terminalWidth()
+	if width < 60 {
+		line := divider(width)
 		fmt.Println(line)
 		for _, port := range ports {
 			entries := byPort[port]
@@ -222,7 +248,6 @@ func printPortStatus(infos []PortInfo, ports []int) {
 				}
 			}
 		}
-		fmt.Println(line)
 		return
 	}
 
@@ -242,10 +267,8 @@ func printPortStatus(infos []PortInfo, ports []int) {
 		}
 	}
 
-	widths := []int{portWidth, protoWidth, statusWidth, processWidth, bindWidth, ageWidth, purposeWidth}
-	fmt.Println(tableBorder(widths))
 	fmt.Printf("  %-*s   %-*s   %-*s   %-*s   %-*s   %-*s   %s\n", portWidth, "PORT", protoWidth, "PROTO", statusWidth, "STATUS", processWidth, "PROCESS", bindWidth, "BIND", ageWidth, "AGE", "WHAT")
-	fmt.Println(tableBorder(widths))
+	fmt.Println(divider(width))
 	printRow := func(port int, proto, status, process, bind, age, purpose string) {
 		fmt.Printf("  %*d   %s   %s   %s   %s   %s   %s\n",
 			portWidth, port,
@@ -267,7 +290,6 @@ func printPortStatus(infos []PortInfo, ports []int) {
 			printRow(port, info.Proto, "used", displayProcess(info.Process), displayBind(info.Bind), displayAge(info.Age), info.Purpose)
 		}
 	}
-	fmt.Println(tableBorder(widths))
 }
 
 func parsePortArgs(args []string) ([]int, bool) {
@@ -414,6 +436,52 @@ func whySuggested(port int) string {
 		}
 		return "high unclaimed app port"
 	}
+}
+
+func sortByRisk(infos []PortInfo) {
+	sort.SliceStable(infos, func(i, j int) bool {
+		leftRisk, rightRisk := riskScore(infos[i]), riskScore(infos[j])
+		if leftRisk != rightRisk {
+			return leftRisk > rightRisk
+		}
+		return infos[i].Port < infos[j].Port
+	})
+}
+
+// sensitivePurposes are exact purpose labels for remote-access, mail, and
+// datastore services; exact matches avoid substring surprises ("mDNS" ⊃ "DNS").
+var sensitivePurposes = map[string]bool{
+	"SSH": true, "DNS": true, "SMTP": true, "SMTP submission": true, "SMTPS": true,
+	"POP3": true, "POP3S": true, "IMAP": true, "IMAPS": true,
+	"MySQL": true, "PostgreSQL": true, "Redis": true,
+}
+
+func riskScore(info PortInfo) int {
+	risk := 0
+	switch displayBind(info.Bind) {
+	case "public":
+		risk += 100
+	case "unknown":
+		risk += 40
+	case "local":
+	default:
+		risk += 70
+	}
+	if _, unusual := privilegedPortFinding(info); unusual {
+		risk += 80
+	} else if info.Port < 1024 {
+		risk += 20
+	}
+	if displayProcess(info.Process) == "unknown" {
+		risk += 20
+	}
+	if sensitivePurposes[info.Purpose] {
+		risk += 30
+	}
+	if processAge, err := time.ParseDuration(info.Age); err == nil && processAge <= 10*time.Minute {
+		risk += 10
+	}
+	return risk
 }
 
 func compactMeta(info PortInfo) string {
@@ -615,10 +683,12 @@ func maxFieldWidth(infos []PortInfo, pick func(PortInfo) string) int {
 }
 
 func tableWidth(widths ...int) int {
-	// Each column costs its width plus "│ " and " "; the final "│" adds one.
-	total := 1
-	for _, w := range widths {
-		total += w + 3
+	total := 3 // leading indentation
+	for i, width := range widths {
+		total += width
+		if i < len(widths)-1 {
+			total += 3
+		}
 	}
 	return total
 }
@@ -632,10 +702,10 @@ func padRight(s string, width int) string {
 }
 
 func terminalWidth() int {
-	if n := terminalWidthFromEnv(); n > 20 {
+	if n := terminalWidthFromTTY(); n > 20 {
 		return n
 	}
-	if n := terminalWidthFromTTY(); n > 20 {
+	if n := terminalWidthFromEnv(); n > 20 {
 		return n
 	}
 	return 100
@@ -670,25 +740,27 @@ func maxInt(a, b int) int {
 }
 
 func discoverPorts() ([]PortInfo, error) {
-	tcpConns, err := gnet.Connections("tcp")
+	// One "inet" query returns TCP and UDP sockets together; reading the
+	// tables twice would double the (comparatively slow) system probing.
+	conns, err := gnet.Connections("inet")
 	if err != nil {
 		return nil, fmt.Errorf("could not discover listening ports: %w", err)
 	}
 
-	infos := make([]PortInfo, 0, len(tcpConns))
-	for _, conn := range tcpConns {
-		if conn.Status != "LISTEN" || conn.Laddr.Port == 0 {
-			continue
-		}
-		infos = append(infos, buildPortInfo(conn, "tcp"))
-	}
-
-	// UDP is best-effort: it has no LISTEN state, so any bound socket without
-	// a remote peer counts, and ephemeral-range ports are skipped because
-	// they are almost always short-lived client sockets (QUIC, DNS lookups).
-	if udpConns, err := gnet.Connections("udp"); err == nil {
-		for _, conn := range udpConns {
-			if conn.Laddr.Port == 0 || conn.Raddr.Port != 0 || int(conn.Laddr.Port) >= 49152 {
+	infos := make([]PortInfo, 0, len(conns))
+	for _, conn := range conns {
+		port := int(conn.Laddr.Port)
+		switch conn.Type {
+		case syscall.SOCK_STREAM:
+			if conn.Status != "LISTEN" || port == 0 {
+				continue
+			}
+			infos = append(infos, buildPortInfo(conn, "tcp"))
+		case syscall.SOCK_DGRAM:
+			// UDP has no LISTEN state, so any bound socket without a remote
+			// peer counts. Unknown ephemeral-range sockets are skipped because
+			// they are almost always short-lived clients; known services stay.
+			if port == 0 || conn.Raddr.Port != 0 || port >= 49152 && udpCommonPorts[port] == "" {
 				continue
 			}
 			infos = append(infos, buildPortInfo(conn, "udp"))
@@ -709,7 +781,7 @@ func buildPortInfo(conn gnet.ConnectionStat, proto string) PortInfo {
 		Owner:   resolveProcessOwner(pid),
 		Bind:    conn.Laddr.IP,
 		Age:     resolveProcessAge(pid),
-		Purpose: explainPort(port, proto, process),
+		Purpose: explainPort(port, proto, process, pid),
 	}
 }
 
@@ -797,12 +869,16 @@ func cleanProcessName(s string) string {
 	return name
 }
 
-func explainPort(port int, proto, process string) string {
+func explainPort(port int, proto, process string, pid int) string {
 	if proto == "udp" {
 		if purpose, ok := udpCommonPorts[port]; ok {
 			return purpose
 		}
 	} else if purpose, ok := commonPorts[port]; ok {
+		return purpose
+	}
+
+	if purpose := purposeFromCmdline(pid); purpose != "" {
 		return purpose
 	}
 
@@ -820,13 +896,103 @@ func explainPort(port int, proto, process string) string {
 		return "Python app/server"
 	case name == "go":
 		return "Go app/server"
-	case port >= 3000 && port <= 3999:
+	case proto != "udp" && port >= 3000 && port <= 3999:
 		return "Likely local development server"
-	case port >= 49152:
-		return "Ephemeral/high dynamic port"
-	default:
-		return "Unknown app/service"
 	}
+
+	// /etc/services (macOS and Linux) is authoritative below 1024 but full of
+	// stale legacy assignments above it, so only fall back to it there when the
+	// process is unresolvable (e.g. another user's service on Linux non-root)
+	// and the registry name is the only evidence left.
+	if port < 1024 || displayProcess(process) == "unknown" {
+		if svc := serviceFromEtc(port, proto); svc != "" {
+			return svc + " (/etc/services)"
+		}
+	}
+
+	if port >= 49152 {
+		return "Ephemeral/high dynamic port"
+	}
+	return "Unknown app/service"
+}
+
+// cmdlineHints identifies servers whose process name is a generic runtime
+// (node, python…) but whose command line names the actual framework.
+var cmdlineHints = []struct{ needle, purpose string }{
+	{"vite", "Vite dev server"},
+	{"next dev", "Next.js dev server"},
+	{"next-server", "Next.js server"},
+	{"react-scripts", "React dev server"},
+	{"webpack", "Webpack dev server"},
+	{"storybook", "Storybook"},
+	{"manage.py runserver", "Django dev server"},
+	{"uvicorn", "Uvicorn ASGI server"},
+	{"gunicorn", "Gunicorn WSGI server"},
+	{"flask", "Flask dev server"},
+	{"rails", "Rails server"},
+	{"php artisan", "Laravel dev server"},
+}
+
+func purposeFromCmdline(pid int) string {
+	cmdline := strings.ToLower(resolveProcessCmdline(pid))
+	if cmdline == "" {
+		return ""
+	}
+	for _, hint := range cmdlineHints {
+		if strings.Contains(cmdline, hint.needle) {
+			return hint.purpose
+		}
+	}
+	return ""
+}
+
+func resolveProcessCmdline(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	if cached, ok := processCmdlineCache[pid]; ok {
+		return cached
+	}
+	cmdline := ""
+	if p, err := gprocess.NewProcess(int32(pid)); err == nil {
+		if line, err := p.Cmdline(); err == nil {
+			cmdline = line
+		}
+	}
+	processCmdlineCache[pid] = cmdline
+	return cmdline
+}
+
+var etcServicesLoaded bool
+var etcServicesMap map[string]string
+
+func serviceFromEtc(port int, proto string) string {
+	if !etcServicesLoaded {
+		etcServicesLoaded = true
+		etcServicesMap = loadServicesFile("/etc/services")
+	}
+	return etcServicesMap[strconv.Itoa(port)+"/"+proto]
+}
+
+func loadServicesFile(path string) map[string]string {
+	services := map[string]string{}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return services
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if i := strings.IndexByte(line, '#'); i >= 0 {
+			line = line[:i]
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		if _, ok := services[fields[1]]; !ok {
+			services[fields[1]] = fields[0]
+		}
+	}
+	return services
 }
 
 func dedupeAndSort(infos []PortInfo) []PortInfo {
